@@ -1,0 +1,197 @@
+import { GoogleGenAI, Type } from "@google/genai";
+import { AISettings } from "../types";
+
+// Default prompt template for Quotes
+const createPrompt = (topic: string, mood: string) => `
+Generate 5 short, witty, viral-worthy T-shirt quotes about "${topic}".
+The vibe is "${mood}". 
+Keep them under 10 words. 
+Make them sound like something a Gen Z person would wear. 
+Use slang if appropriate but keep it readable. 
+Do not use hashtags.
+RETURN ONLY A PURE JSON ARRAY OF STRINGS. NO MARKDOWN.
+Example: ["Quote 1", "Quote 2"]
+`;
+
+const defaultGeminiKey = process.env.API_KEY || '';
+
+export const generateQuotesService = async (topic: string, mood: string, settings: AISettings): Promise<string[]> => {
+  const prompt = createPrompt(topic, mood);
+
+  // --- GEMINI HANDLER ---
+  if (settings.provider === 'gemini') {
+    const key = defaultGeminiKey;
+    if (!key) {
+       console.warn("Demo API Key is missing.");
+       return ["DEMO KEY MISSING", "CONFIGURE CUSTOM AI", "CHECK SETTINGS"];
+    }
+    const ai = new GoogleGenAI({ apiKey: key });
+
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING }
+          }
+        }
+      });
+      const text = response.text;
+      return text ? JSON.parse(text) : [];
+    } catch (error) {
+      console.error("Gemini Error:", error);
+      throw error;
+    }
+  }
+
+  // --- CUSTOM LLM HANDLER (OpenAI Compatible) ---
+  if (settings.provider === 'custom') {
+    const endpoint = settings.customEndpoint || 'http://localhost:11434/v1/chat/completions';
+    
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(settings.customApiKey ? { 'Authorization': `Bearer ${settings.customApiKey}` } : {})
+        },
+        body: JSON.stringify({
+          model: settings.customModelName || 'llama3', // Default or user specified
+          messages: [
+            { role: "system", content: "You are a helpful creative assistant that outputs strictly JSON arrays." },
+            { role: "user", content: prompt }
+          ],
+          stream: false,
+          temperature: 0.8
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Custom API Error: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      
+      // Parse OpenAI-style response
+      let content = data.choices?.[0]?.message?.content;
+      
+      if (!content) return ["NO CONTENT RETURNED"];
+
+      // Cleanup code blocks if the local LLM wraps in markdown
+      content = content.replace(/```json/g, '').replace(/```/g, '').trim();
+
+      try {
+        const parsed = JSON.parse(content);
+        return Array.isArray(parsed) ? parsed : [content];
+      } catch (e) {
+        // Fallback if not valid JSON
+        console.warn("Failed to parse JSON from custom LLM", e);
+        return content.split('\n').filter((l: string) => l.length > 0 && l.length < 50).slice(0, 5);
+      }
+
+    } catch (error) {
+       console.error("Custom AI Error:", error);
+       return ["CONNECTION FAILED", "CHECK ENDPOINT", "IS OLLAMA RUNNING?"];
+    }
+  }
+
+  return [];
+};
+
+export const cartoonifyImage = async (base64Image: string, style: string): Promise<string> => {
+  const key = defaultGeminiKey;
+  if (!key) throw new Error("Missing API Key");
+
+  const ai = new GoogleGenAI({ apiKey: key });
+
+  // Remove header if present for processing
+  const base64Data = base64Image.replace(/^data:image\/\w+;base64,/, "");
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image', // Using image model for multimodal input
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: base64Data,
+              mimeType: 'image/png', // Assuming PNG for simplicity from upload
+            },
+          },
+          {
+            text: `Transform this photo into a ${style} cartoon style illustration suitable for a T-shirt print. 
+            Make it look like a high-quality vector sticker. 
+            Maintain the facial features so it is recognizable but stylized. 
+            Solid, clean background or transparent if possible.`,
+          },
+        ],
+      },
+    });
+
+    // Extract image from response
+    // The model might return text or image. We look for inlineData.
+    if (response.candidates && response.candidates[0].content && response.candidates[0].content.parts) {
+        for (const part of response.candidates[0].content.parts) {
+            if (part.inlineData && part.inlineData.data) {
+                return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+            }
+        }
+    }
+    
+    throw new Error("No image generated by AI");
+
+  } catch (error) {
+    console.error("Cartoonify Error:", error);
+    throw error;
+  }
+};
+
+export const generateDesignImage = async (prompt: string, style: string): Promise<string> => {
+  const key = process.env.API_KEY || '';
+  if (!key) throw new Error("Missing API Key");
+
+  const ai = new GoogleGenAI({ apiKey: key });
+
+  // Constructed prompt for better graphic design results
+  const finalPrompt = `
+    Create a high-quality, professional T-shirt graphic design.
+    Subject: ${prompt}.
+    Art Style: ${style}.
+    Requirements:
+    - Centralized composition suitable for printing on a shirt.
+    - Vector art aesthetic, clean lines, vibrant colors.
+    - No text/typography (unless part of the artistic style).
+    - Isolated on a plain background or transparent-friendly background.
+    - High contrast, bold visual impact.
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [{ text: finalPrompt }],
+      },
+      config: {
+        imageConfig: {
+            aspectRatio: "1:1"
+        }
+      }
+    });
+
+    if (response.candidates && response.candidates[0].content && response.candidates[0].content.parts) {
+        for (const part of response.candidates[0].content.parts) {
+            if (part.inlineData && part.inlineData.data) {
+                return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+            }
+        }
+    }
+    
+    throw new Error("No image generated.");
+  } catch (error) {
+    console.error("Generate Design Error:", error);
+    throw error;
+  }
+};
